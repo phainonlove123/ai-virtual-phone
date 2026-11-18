@@ -126,7 +126,20 @@ import { WidgetRenderer } from "@/components/widgets/widget-renderer";
 import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DebugPromptPanel } from "@/components/debug-prompt-panel";
 import { QuickActionFloat } from "@/components/quick-action-float";
-import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
+import {
+  CHAT_MESSAGE_PUSHED_EVENT,
+  CHAT_MESSAGES_DELETED_EVENT,
+  CHAT_REQUEST_REPLY_EVENT,
+  CHAT_SESSIONS_UNREAD_UPDATED_EVENT,
+  getTotalChatUnreadCount,
+  hydrateChatStorage,
+  loadChatSessions,
+  loadChatMessages,
+  pushChatMessage,
+  setActiveViewedChatSession,
+  type ChatMessage,
+  type ChatSession,
+} from "@/lib/chat-storage";
 import { ensureGlobalBindingDefaults, resolveUserIdentity } from "@/lib/settings-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { generateChatCompletion, flattenCompletionResult } from "@/lib/chat-engine";
@@ -1073,6 +1086,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const customAppUpdateCheckingRef = useRef<Set<string>>(new Set());
   const activeAppRef = useRef<DesktopIconId | null>(null);
   const [customAppBadges, setCustomAppBadges] = useState<Record<string, number>>({});
+  const [chatUnreadCount, setChatUnreadCount] = useState(0);
   const [customAppBackgroundRuns, setCustomAppBackgroundRuns] = useState<CustomAppBackgroundEventRun[]>([]);
   const [customAppBackgroundToolRuns, setCustomAppBackgroundToolRuns] = useState<CustomAppBackgroundToolRun[]>([]);
   const backgroundRunSeqRef = useRef(0);
@@ -1584,6 +1598,25 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   }, []);
 
   useEffect(() => {
+    const refreshChatUnread = () => setChatUnreadCount(getTotalChatUnreadCount());
+    refreshChatUnread();
+    window.addEventListener(CHAT_SESSIONS_UNREAD_UPDATED_EVENT, refreshChatUnread);
+    window.addEventListener(CHAT_MESSAGE_PUSHED_EVENT, refreshChatUnread);
+    window.addEventListener(CHAT_MESSAGES_DELETED_EVENT, refreshChatUnread);
+    window.addEventListener("weixin-messages-updated", refreshChatUnread);
+    window.addEventListener("chat-messages-updated", refreshChatUnread);
+    window.addEventListener("followup-fired", refreshChatUnread);
+    return () => {
+      window.removeEventListener(CHAT_SESSIONS_UNREAD_UPDATED_EVENT, refreshChatUnread);
+      window.removeEventListener(CHAT_MESSAGE_PUSHED_EVENT, refreshChatUnread);
+      window.removeEventListener(CHAT_MESSAGES_DELETED_EVENT, refreshChatUnread);
+      window.removeEventListener("weixin-messages-updated", refreshChatUnread);
+      window.removeEventListener("chat-messages-updated", refreshChatUnread);
+      window.removeEventListener("followup-fired", refreshChatUnread);
+    };
+  }, []);
+
+  useEffect(() => {
     const unregister = registerCustomAppBackgroundToolExecutor(payload => (
       new Promise<unknown>((resolve, reject) => {
         const id = `bg_tool_${Date.now()}_${++backgroundRunSeqRef.current}_${payload.app.id}`;
@@ -1802,6 +1835,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
       }
 
       if (cancelled) return;
+      setChatUnreadCount(getTotalChatUnreadCount());
       startFollowUpService();
       startMomentsService();
       startDiaryEntryTimerService();
@@ -2415,10 +2449,28 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
   const [showMiniChat, setShowMiniChat] = useState(false);
   const [miniSharePayload, setMiniSharePayload] = useState<ChatSharePayload | null>(null);
   const miniSessionRef = useRef<ChatSession | null>(null);
+  const [miniChatSessionId, setMiniChatSessionId] = useState<string | null>(null);
   const handleMiniChatClose = useCallback(() => setShowMiniChat(false), []);
   const handleMiniChatSessionChange = useCallback((session: ChatSession | null) => {
     miniSessionRef.current = session;
+    setMiniChatSessionId(session?.id ?? null);
   }, []);
+
+  useEffect(() => {
+    if (activeApp !== "chat" && activeChatSession !== null) {
+      setActiveChatSession(null);
+    }
+  }, [activeApp, activeChatSession]);
+
+  useEffect(() => {
+    setActiveViewedChatSession("main", activeApp === "chat" && activeChatSession ? activeChatSession.id : null);
+    return () => setActiveViewedChatSession("main", null);
+  }, [activeApp, activeChatSession]);
+
+  useEffect(() => {
+    setActiveViewedChatSession("mini", showMiniChat ? miniChatSessionId : null);
+    return () => setActiveViewedChatSession("mini", null);
+  }, [showMiniChat, miniChatSessionId]);
   const handleMiniShareDone = useCallback(() => setMiniSharePayload(null), []);
   const handleMiniChatExpand = useCallback(() => {
     setShowMiniChat(false);
@@ -4588,6 +4640,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                                 const folder = folders[iconId];
                                 if (!folder) return null;
                                 const folderBadge = folder.icons.reduce((sum, memberId) => {
+                                  if (memberId === "chat") return sum + chatUnreadCount;
                                   const appId = customAppIdFromIconId(memberId);
                                   return sum + (appId ? customAppBadges[appId] ?? 0 : 0);
                                 }, 0);
@@ -4625,7 +4678,9 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                                 : null;
                               const iconImageUrl = iconSkinUrl || customIconUrl;
                               const hasImageIcon = Boolean(iconImageUrl);
-                              const badgeCount = customApp ? customAppBadges[customApp.id] ?? 0 : 0;
+                              const badgeCount = iconId === "chat"
+                                ? chatUnreadCount
+                                : (customApp ? customAppBadges[customApp.id] ?? 0 : 0);
                               return (
                                 <button
                                   key={iconId}
@@ -4764,6 +4819,9 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                       : null;
                     const iconImageUrl = iconSkinUrl || customIconUrl;
                     const hasImageIcon = Boolean(iconImageUrl);
+                    const dockBadge = iconId === "chat"
+                      ? chatUnreadCount
+                      : (customApp ? customAppBadges[customApp.id] ?? 0 : 0);
                     const isDragging = dragItem?.type === "icon" && dragItem.id === iconId;
                     return (
                       <button
@@ -4802,6 +4860,11 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                           ) : customIconUrl ? null : (
                             <CustomAppGlyph seed={customApp?.name || icon.label} className="icon-glyph" />
                           )}
+                          {dockBadge > 0 ? (
+                            <span className="desktop-icon-badge" aria-label={`${dockBadge} 条未读`}>
+                              {dockBadge > 99 ? "99+" : dockBadge}
+                            </span>
+                          ) : null}
                         </span>
                         <span className="icon-label">{icon.label}</span>
                       </button>
@@ -4971,7 +5034,9 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                                 ? memberCustomApp.iconDataUrl ?? null
                                 : null;
                               const memberImageUrl = memberSkinUrl || memberCustomUrl;
-                              const memberBadge = memberCustomApp ? customAppBadges[memberCustomApp.id] ?? 0 : 0;
+                              const memberBadge = memberId === "chat"
+                                ? chatUnreadCount
+                                : (memberCustomApp ? customAppBadges[memberCustomApp.id] ?? 0 : 0);
                               return (
                                 <button
                                   key={memberId}

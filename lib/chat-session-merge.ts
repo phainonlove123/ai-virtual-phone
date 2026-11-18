@@ -7,7 +7,9 @@ import { loadCharacters } from "./character-storage";
 import { getLastChatOfflineTurn, loadChatOfflineTurns, saveChatOfflineTurns } from "./chat-offline-storage";
 import { removeChatSessionCompletely } from "./chat-session-remove";
 import {
+    dispatchChatSessionsUnreadUpdated,
     getLastVisibleSessionMessage,
+    isChatSessionActivelyViewed,
     loadChatSessions,
     reassignChatSessionMessages,
     saveChatSessions,
@@ -140,15 +142,25 @@ export function mergeDuplicateSessionGroup(group: DuplicateSessionGroup): void {
         removeChatSessionCompletely(source.id);
     }
 
-    // 任一来源置过顶就保留置顶
-    if (!target.isPinned && rest.some(s => s.isPinned)) {
+    // 任一来源置过顶就保留置顶；把被合并会话的未读数一并保留到目标会话
+    const extraUnread = rest.reduce((sum, s) => sum + Math.max(0, Math.floor(Number(s.unreadCount) || 0)), 0);
+    const shouldPin = !target.isPinned && rest.some(s => s.isPinned);
+    if (shouldPin || (extraUnread > 0 && !isChatSessionActivelyViewed(target.id))) {
         const sessions = loadChatSessions();
         const idx = sessions.findIndex(s => s.id === target.id);
         if (idx !== -1) {
-            sessions[idx] = { ...sessions[idx], isPinned: true };
+            const curUnread = Math.max(0, Math.floor(Number(sessions[idx].unreadCount) || 0));
+            sessions[idx] = {
+                ...sessions[idx],
+                ...(shouldPin ? { isPinned: true } : {}),
+                ...(extraUnread > 0 && !isChatSessionActivelyViewed(target.id)
+                    ? { unreadCount: curUnread + extraUnread }
+                    : {}),
+            };
             saveChatSessions(sessions);
         }
     }
+    dispatchChatSessionsUnreadUpdated();
 
     if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent<ChatSessionsMergedDetail>(CHAT_SESSIONS_MERGED_EVENT, {

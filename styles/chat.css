@@ -239,17 +239,19 @@
   z-index: 1;
 }
 .minimal-unread-count {
-  background: var(--c-action-blue, #246bfd);
+  background: var(--c-danger, #ef4444);
   color: #fff;
-  font-size: calc(9px*var(--app-text-scale,1));
+  font-size: calc(10px*var(--app-text-scale,1));
   font-weight: 700;
-  padding: 0 6px;
+  line-height: 1;
+  padding: 0 5px;
   min-width: 18px;
   height: 18px;
   border-radius: 999px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 }
 
 
@@ -595,6 +597,33 @@
 
 .chat-tab-active {
   color: var(--c-icon-active);
+}
+
+.chat-tab-icon-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-tab-badge {
+  position: absolute;
+  top: -5px;
+  right: -10px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--c-danger, #ef4444);
+  color: #fff;
+  font-size: calc(9px*var(--app-text-scale,1));
+  font-weight: 700;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid var(--c-card, #ffffff);
+  pointer-events: none;
 }
 
 /* ── Typing indicator (below header title) ── */
