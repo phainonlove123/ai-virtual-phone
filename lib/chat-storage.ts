@@ -288,6 +288,7 @@ export function isSessionStreamingEnabled(session: Pick<ChatSession, "streamOnli
 export const CHAT_APP_SETTINGS_UPDATED_EVENT = "chat-app-settings-updated";
 export const CHAT_MESSAGE_PUSHED_EVENT = "chat-message-pushed";
 export const CHAT_MESSAGES_DELETED_EVENT = "chat-messages-deleted";
+export const CHAT_SESSIONS_UNREAD_UPDATED_EVENT = "chat-sessions-unread-updated";
 export const CHAT_REQUEST_REPLY_EVENT = "chat-request-reply";
 /** 长按编辑整批回复后重建消息：携带新消息与编辑后的原文，供云同步回写。 */
 export const CHAT_RESPONSE_BATCH_REPLACED_EVENT = "chat-response-batch-replaced";
@@ -973,6 +974,7 @@ export function hydrateChatStorage(): Promise<void> {
         if (normalizedContacts.changed) dbReplaceContacts(normalizedContacts.items);
         if (normalizedSessions.changed || redirectedMessages > 0 || refreshedSessions.changed) dbReplaceSessions(refreshedSessions.items);
         _hydrated = true;
+        dispatchChatSessionsUnreadUpdated();
     }).catch(err => {
         console.warn("[ChatStorage] hydration failed, will retry on next call:", err);
         _hydratePromise = null;
@@ -1030,6 +1032,21 @@ export function removeChatContact(characterId: string) {
     const contacts = loadChatContacts();
     saveChatContacts(contacts.filter(c => c.characterId !== characterId));
     markContactRemoved(characterId);
+
+    // 删好友后清掉对应单聊的残留未读数，避免总未读角标出现异常波动
+    let unreadChanged = false;
+    const nextSessions = _sessionsCache.map(s => {
+        if (!s.isGroup && s.contactId === characterId && normalizeUnreadCount(s.unreadCount) > 0) {
+            unreadChanged = true;
+            return { ...s, unreadCount: 0 };
+        }
+        return s;
+    });
+    if (unreadChanged) {
+        _sessionsCache = nextSessions;
+        dbPutSessions(nextSessions.filter(s => !s.isGroup && s.contactId === characterId));
+    }
+    dispatchChatSessionsUnreadUpdated();
 }
 
 // ── CRUD for Sessions ─────────────────────────
@@ -1106,6 +1123,7 @@ export function deleteChatSession(sessionId: string) {
     saveChatSessions(filtered);
     dbDeleteSession(sessionId);
     clearChatSessionMessages(sessionId); // Cleanup associated messages
+    dispatchChatSessionsUnreadUpdated();
 }
 
 // 把一个会话的全部消息挪到另一个会话名下（重复会话合并用）。
@@ -1148,6 +1166,79 @@ export function createToolExecutionId(): string {
     return `toolrun_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
+function normalizeUnreadCount(value: unknown): number {
+    const num = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(num) || num <= 0) return 0;
+    return Math.floor(num);
+}
+
+export function dispatchChatSessionsUnreadUpdated(): void {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(new CustomEvent(CHAT_SESSIONS_UNREAD_UPDATED_EVENT));
+}
+
+// 记录当前正在前台展示的聊天室（"main" 主窗口 / "mini" 音乐悬浮窗），
+// 仅对当前未被用户直接查看的会话累加未读红点。
+const _activeViewedSessions = new Map<string, string>();
+
+export function isChatSessionActivelyViewed(sessionId: string): boolean {
+    if (!sessionId) return false;
+    for (const activeId of _activeViewedSessions.values()) {
+        if (activeId === sessionId) return true;
+    }
+    return false;
+}
+
+export function clearChatSessionUnread(sessionId: string): boolean {
+    if (!sessionId) return false;
+    const sessIdx = _sessionsCache.findIndex(s => s.id === sessionId);
+    if (sessIdx === -1) return false;
+    const target = _sessionsCache[sessIdx];
+    if (normalizeUnreadCount(target.unreadCount) === 0) return false;
+    const updated: ChatSession = { ...target, unreadCount: 0 };
+    _sessionsCache = _sessionsCache.map((s, idx) => (idx === sessIdx ? updated : s));
+    dbPutSessions([updated]);
+    dispatchChatSessionsUnreadUpdated();
+    return true;
+}
+
+export function setActiveViewedChatSession(slot: "main" | "mini", sessionId: string | null): void {
+    const normalized = sessionId?.trim() || null;
+    if (normalized) {
+        _activeViewedSessions.set(slot, normalized);
+        clearChatSessionUnread(normalized);
+    } else {
+        _activeViewedSessions.delete(slot);
+    }
+}
+
+function shouldCountMessageAsUnread(msg: ChatMessage): boolean {
+    if (msg.isRetracted) return false;
+    if (!isSessionPreviewCandidate(msg)) return false;
+    if (msg.role === "assistant") return true;
+    if (msg.role === "system" && msg.mediaType === "poke") {
+        const sender = msg.mediaData?.pokeSender?.trim();
+        if (!sender || sender === "你") return false;
+        try {
+            const userName = resolveUserIdentity()?.name?.trim();
+            if (userName && sender === userName) return false;
+        } catch { /* ignore */ }
+        return true;
+    }
+    return false;
+}
+
+export function getTotalChatUnreadCount(): number {
+    const contactIds = new Set(loadChatContacts().map(c => c.characterId));
+    let total = 0;
+    for (const session of _sessionsCache) {
+        if (!(session.isGroup || contactIds.has(session.contactId))) continue;
+        const unread = normalizeUnreadCount(session.unreadCount);
+        if (unread > 0) total += unread;
+    }
+    return total;
+}
+
 export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "status"> & {
     status?: ChatMessageStatus;
     createdAt?: string;
@@ -1173,22 +1264,44 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
     // 优化：直接增量更新内存会话缓存并异步写单条，避免每次发送都走 loadChatSessions +
     // saveChatSessions 触发全量会话预览重算（会话/消息多了以后会明显卡顿）。
     const preview = getChatMessagePreview(newMsg);
+    const isPreviewCandidate = isSessionPreviewCandidate(newMsg);
+    const shouldIncrementUnread = shouldCountMessageAsUnread(newMsg) && !isChatSessionActivelyViewed(msg.sessionId);
     const sessIdx = _sessionsCache.findIndex(s => s.id === msg.sessionId);
-    if (sessIdx !== -1 && isSessionPreviewCandidate(newMsg)) {
+    if (sessIdx !== -1 && (isPreviewCandidate || shouldIncrementUnread)) {
         const target = _sessionsCache[sessIdx];
-        target.lastMessageId = newMsg.id;
-        if (preview) target.lastMessagePreview = preview;
-        target.updatedAt = newMsg.createdAt;
-        dbPutSessions([target]);
+        const updatedTarget: ChatSession = {
+            ...target,
+            ...(isPreviewCandidate ? {
+                lastMessageId: newMsg.id,
+                ...(preview ? { lastMessagePreview: preview } : {}),
+                updatedAt: newMsg.createdAt,
+            } : {}),
+            ...(shouldIncrementUnread ? {
+                unreadCount: normalizeUnreadCount(target.unreadCount) + 1,
+            } : {}),
+        };
+        _sessionsCache = _sessionsCache.map((s, idx) => (idx === sessIdx ? updatedTarget : s));
+        dbPutSessions([updatedTarget]);
+        if (shouldIncrementUnread) dispatchChatSessionsUnreadUpdated();
     } else if (sessIdx === -1) {
         // 缓存未命中（极端情况）：回退全量路径，保证列表预览仍会刷新
         const sessions = loadChatSessions();
         const idx2 = sessions.findIndex(s => s.id === msg.sessionId);
-        if (idx2 !== -1 && isSessionPreviewCandidate(newMsg)) {
-            sessions[idx2].lastMessageId = newMsg.id;
-            if (preview) sessions[idx2].lastMessagePreview = preview;
-            sessions[idx2].updatedAt = newMsg.createdAt;
-            saveChatSessions(sessions);
+        if (idx2 !== -1 && (isPreviewCandidate || shouldIncrementUnread)) {
+            const nextSessions = [...sessions];
+            nextSessions[idx2] = {
+                ...sessions[idx2],
+                ...(isPreviewCandidate ? {
+                    lastMessageId: newMsg.id,
+                    ...(preview ? { lastMessagePreview: preview } : {}),
+                    updatedAt: newMsg.createdAt,
+                } : {}),
+                ...(shouldIncrementUnread ? {
+                    unreadCount: normalizeUnreadCount(sessions[idx2].unreadCount) + 1,
+                } : {}),
+            };
+            saveChatSessions(nextSessions);
+            if (shouldIncrementUnread) dispatchChatSessionsUnreadUpdated();
         }
     }
 
@@ -1217,13 +1330,25 @@ export function upsertImportedChatMessage(msg: ChatMessage): { message: ChatMess
     const preview = getChatMessagePreview(newMsg);
     const sessions = loadChatSessions();
     const sessIdx = sessions.findIndex(s => s.id === newMsg.sessionId);
-    if (sessIdx !== -1 && isSessionPreviewCandidate(newMsg)) {
+    const shouldIncrementUnread = shouldCountMessageAsUnread(newMsg) && !isChatSessionActivelyViewed(newMsg.sessionId);
+    if (sessIdx !== -1 && (isSessionPreviewCandidate(newMsg) || shouldIncrementUnread)) {
         const currentLast = getLastVisibleSessionMessage(newMsg.sessionId);
-        if (!currentLast || currentLast.id === newMsg.id) {
-            sessions[sessIdx].lastMessageId = newMsg.id;
-            if (preview) sessions[sessIdx].lastMessagePreview = preview;
-            sessions[sessIdx].updatedAt = newMsg.createdAt;
-            saveChatSessions(sessions);
+        const shouldUpdatePreview = isSessionPreviewCandidate(newMsg) && (!currentLast || currentLast.id === newMsg.id);
+        if (shouldUpdatePreview || shouldIncrementUnread) {
+            const nextSessions = [...sessions];
+            nextSessions[sessIdx] = {
+                ...sessions[sessIdx],
+                ...(shouldUpdatePreview ? {
+                    lastMessageId: newMsg.id,
+                    ...(preview ? { lastMessagePreview: preview } : {}),
+                    updatedAt: newMsg.createdAt,
+                } : {}),
+                ...(shouldIncrementUnread ? {
+                    unreadCount: normalizeUnreadCount(sessions[sessIdx].unreadCount) + 1,
+                } : {}),
+            };
+            saveChatSessions(nextSessions);
+            if (shouldIncrementUnread) dispatchChatSessionsUnreadUpdated();
         }
     }
 
@@ -1450,8 +1575,10 @@ export function deleteChatMessage(messageId: string) {
         } else {
             sessions[sessIdx].lastMessageId = undefined;
             sessions[sessIdx].lastMessagePreview = "";
+            sessions[sessIdx].unreadCount = 0;
         }
         saveChatSessions(sessions);
+        if (!lastMsg) dispatchChatSessionsUnreadUpdated();
     }
 
     dispatchDeletedMessages(deletedMessages);
@@ -1485,8 +1612,10 @@ export function deleteChatMessagesFrom(messageId: string) {
         } else {
             sessions[sessIdx].lastMessageId = undefined;
             sessions[sessIdx].lastMessagePreview = "";
+            sessions[sessIdx].unreadCount = 0;
         }
         saveChatSessions(sessions);
+        if (!lastMsg) dispatchChatSessionsUnreadUpdated();
     }
 
     dispatchDeletedMessages(deletedMessages);
@@ -1519,8 +1648,10 @@ export function deleteChatMessagesByIds(sessionId: string, messageIds: string[])
         } else {
             sessions[sessIdx].lastMessageId = undefined;
             sessions[sessIdx].lastMessagePreview = "";
+            sessions[sessIdx].unreadCount = 0;
         }
         saveChatSessions(sessions);
+        if (!lastMsg) dispatchChatSessionsUnreadUpdated();
     }
 
     dispatchDeletedMessages(deletedMessages);
@@ -1574,7 +1705,9 @@ export function clearChatSessionMessages(sessionId: string) {
     if (sessIdx !== -1) {
         sessions[sessIdx].lastMessageId = undefined;
         sessions[sessIdx].lastMessagePreview = "";
+        sessions[sessIdx].unreadCount = 0;
         saveChatSessions(sessions);
+        dispatchChatSessionsUnreadUpdated();
     }
 
     dispatchDeletedMessages(deletedMessages);

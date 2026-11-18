@@ -8,7 +8,17 @@ import { ChatRoom } from "./chat-room";
 import { MascotChatRoom } from "./mascot-chat-room";
 import { UserProfilePanel } from "./user-profile-panel";
 import { MessageCircle, Users, Aperture, UserRound } from "lucide-react";
-import { ChatSession, loadChatSessions, pushChatMessage, hydrateChatStorage } from "@/lib/chat-storage";
+import {
+    CHAT_MESSAGE_PUSHED_EVENT,
+    CHAT_MESSAGES_DELETED_EVENT,
+    CHAT_SESSIONS_UNREAD_UPDATED_EVENT,
+    ChatSession,
+    clearChatSessionUnread,
+    getTotalChatUnreadCount,
+    hydrateChatStorage,
+    loadChatSessions,
+    pushChatMessage,
+} from "@/lib/chat-storage";
 import { notifyMascotPageContext } from "@/lib/mascot-events";
 import { loadCharacters } from "@/lib/character-storage";
 import { SessionCustomCSS } from "@/components/ui/session-custom-css";
@@ -40,11 +50,13 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
     const [visitedSessions, setVisitedSessions] = useState<Map<string, ChatSession>>(new Map());
     const [dbReady, setDbReady] = useState(false);
     const [hideTabBar, setHideTabBar] = useState(false);
+    const [totalUnreadCount, setTotalUnreadCount] = useState(0);
 
     // Hydrate IndexedDB → in-memory caches on mount
     useEffect(() => {
         hydrateChatStorage().then(() => {
             setDbReady(true);
+            setTotalUnreadCount(getTotalChatUnreadCount());
             // Resolve initial session after hydration
             if (initialSessionId) {
                 const s = loadChatSessions().find(s => s.id === initialSessionId);
@@ -52,6 +64,24 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
             }
         });
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    useEffect(() => {
+        if (!dbReady) return;
+        const refreshUnread = () => setTotalUnreadCount(getTotalChatUnreadCount());
+        refreshUnread();
+        window.addEventListener(CHAT_SESSIONS_UNREAD_UPDATED_EVENT, refreshUnread);
+        window.addEventListener(CHAT_MESSAGE_PUSHED_EVENT, refreshUnread);
+        window.addEventListener(CHAT_MESSAGES_DELETED_EVENT, refreshUnread);
+        window.addEventListener("weixin-messages-updated", refreshUnread);
+        window.addEventListener("chat-messages-updated", refreshUnread);
+        return () => {
+            window.removeEventListener(CHAT_SESSIONS_UNREAD_UPDATED_EVENT, refreshUnread);
+            window.removeEventListener(CHAT_MESSAGE_PUSHED_EVENT, refreshUnread);
+            window.removeEventListener(CHAT_MESSAGES_DELETED_EVENT, refreshUnread);
+            window.removeEventListener("weixin-messages-updated", refreshUnread);
+            window.removeEventListener("chat-messages-updated", refreshUnread);
+        };
+    }, [dbReady]);
 
     // React to external session navigation (e.g., incoming call acceptance)
     // Only fires when initialSessionId CHANGES after mount (mount case handled by hydration above)
@@ -133,6 +163,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
     useEffect(() => {
         onSessionChange?.(activeSession);
         if (activeSession) {
+            clearChatSessionUnread(activeSession.id);
             setActiveMascot(false);
             setVisitedSessions(prev => {
                 if (prev.has(activeSession.id)) return prev;
@@ -272,7 +303,14 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
                     className={`chat-tab ${activeTab === "messages" ? "chat-tab-active" : ""}`}
                     onClick={() => setActiveTab("messages")}
                 >
-                    <MessageCircleIcon active={activeTab === "messages"} />
+                    <span className="chat-tab-icon-wrap">
+                        <MessageCircleIcon active={activeTab === "messages"} />
+                        {totalUnreadCount > 0 && (
+                            <span className="chat-tab-badge" aria-label={`${totalUnreadCount} 条未读`}>
+                                {totalUnreadCount > 99 ? "99+" : totalUnreadCount}
+                            </span>
+                        )}
+                    </span>
                     <span style={{ fontSize: "calc(10px*var(--app-text-scale,1))", color: activeTab === "messages" ? undefined : "var(--c-text)" }}>消息</span>
                 </button>
                 <button

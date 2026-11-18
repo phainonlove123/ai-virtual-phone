@@ -2,7 +2,21 @@
 
 import React, { useState, useEffect, useSyncExternalStore } from "react";
 import { ChevronLeft } from "lucide-react";
-import { loadChatSessions, loadChatContacts, ChatSession, createOrGetSession, createGroupSession, pushChatMessage, addChatContact, loadChatMessages, getLastVisibleSessionMessage, getChatMessagePreview } from "@/lib/chat-storage";
+import {
+    loadChatSessions,
+    loadChatContacts,
+    ChatSession,
+    createOrGetSession,
+    createGroupSession,
+    pushChatMessage,
+    addChatContact,
+    loadChatMessages,
+    getLastVisibleSessionMessage,
+    getChatMessagePreview,
+    CHAT_MESSAGE_PUSHED_EVENT,
+    CHAT_MESSAGES_DELETED_EVENT,
+    CHAT_SESSIONS_UNREAD_UPDATED_EVENT,
+} from "@/lib/chat-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { Character } from "@/lib/character-types";
 import { resolveUserIdentity } from "@/lib/settings-storage";
@@ -139,17 +153,25 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
 
     useEffect(() => {
         if (!activeSession) {
-            setSessions(loadChatSessions());
+            setSessions([...loadChatSessions()]);
         }
     }, [activeSession]);
 
     useEffect(() => {
-        const refreshSessions = () => setSessions(loadChatSessions());
+        const refreshSessions = () => setSessions([...loadChatSessions()]);
         window.addEventListener("weixin-messages-updated", refreshSessions);
         window.addEventListener("chat-messages-updated", refreshSessions);
+        window.addEventListener(CHAT_MESSAGE_PUSHED_EVENT, refreshSessions);
+        window.addEventListener(CHAT_MESSAGES_DELETED_EVENT, refreshSessions);
+        window.addEventListener(CHAT_SESSIONS_UNREAD_UPDATED_EVENT, refreshSessions);
+        window.addEventListener("followup-fired", refreshSessions);
         return () => {
             window.removeEventListener("weixin-messages-updated", refreshSessions);
             window.removeEventListener("chat-messages-updated", refreshSessions);
+            window.removeEventListener(CHAT_MESSAGE_PUSHED_EVENT, refreshSessions);
+            window.removeEventListener(CHAT_MESSAGES_DELETED_EVENT, refreshSessions);
+            window.removeEventListener(CHAT_SESSIONS_UNREAD_UPDATED_EVENT, refreshSessions);
+            window.removeEventListener("followup-fired", refreshSessions);
         };
     }, []);
 
@@ -758,6 +780,7 @@ function SessionItem({ session, onSelect, isPinned }: { session: ChatSession, on
     const onlinePreview = lastVisibleMessage ? (getChatMessagePreview(lastVisibleMessage) || lastVisibleMessage.content) : "";
     const preview = offlineIsNewer ? getChatOfflineTurnPreview(lastOfflineTurn) : onlinePreview;
     const displayTime = pickLaterTime(lastVisibleMessage?.createdAt, lastOfflineTurn?.createdAt) || session.updatedAt;
+    const unreadCount = Math.max(0, Math.floor(Number(session.unreadCount) || 0));
 
     // Group chat: build grid of participant avatars (2×2)
     const isGroup = session.isGroup;
@@ -775,6 +798,8 @@ function SessionItem({ session, onSelect, isPinned }: { session: ChatSession, on
     return (
         <div
             className={`minimal-list-item${isPinned ? ' chat-pinned' : ''}`}
+            data-session-id={session.id}
+            data-unread={unreadCount > 0 ? "1" : undefined}
             onClick={onSelect}
         >
             {isGroup ? (
@@ -815,6 +840,11 @@ function SessionItem({ session, onSelect, isPinned }: { session: ChatSession, on
                     <span className="ts-13 text-[var(--c-text)] opacity-80 truncate font-normal">
                         {preview || getLastNonEmptyPreview(session.id)}
                     </span>
+                    {unreadCount > 0 && (
+                        <span className="minimal-unread-count" aria-label={`${unreadCount} 条未读`}>
+                            {unreadCount > 99 ? "99+" : unreadCount}
+                        </span>
+                    )}
                 </div>
             </div>
         </div>
