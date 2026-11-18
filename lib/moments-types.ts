@@ -56,3 +56,7 @@ export type PendingReaction = {
     triggeringCommentIds?: string[];   // character_reply 专用
     targetNpcName?: string;            // npc_reply 专用
 };
+
+export type MomentAuthorProfileTarget =
+    | { authorType: "character"; authorId: string }
+    | { authorType: "user" };

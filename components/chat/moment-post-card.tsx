@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
-import type { MomentPost, MomentComment } from "@/lib/moments-types";
+import type { MomentAuthorProfileTarget, MomentPost, MomentComment } from "@/lib/moments-types";
 import { BilingualTextBlock, MediaImageWithPreview } from "@/components/chat/message-bubble";
 import { MediaPreviewOverlay } from "@/components/chat/media-preview-overlay";
 import {
@@ -30,6 +30,7 @@ type Props = {
     onRequestDelete?: (postId: string) => void;
     onOpenCommentComposer?: (post: MomentPost) => void;
     onOpenReplyComposer?: (post: MomentPost, comment: MomentComment, replyName: string) => void;
+    onSelectAuthor?: (target: MomentAuthorProfileTarget) => void;
 };
 
 const DEFAULT_MOMENT_AVATAR_SRC = "/images/default-moment-avatar.png";
@@ -38,7 +39,7 @@ function MomentDefaultAvatar({ alt = "" }: { alt?: string }) {
     return <img src={DEFAULT_MOMENT_AVATAR_SRC} alt={alt} className="feed-default-avatar w-full h-full object-cover" />;
 }
 
-export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentComposer, onOpenReplyComposer }: Props) {
+export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentComposer, onOpenReplyComposer, onSelectAuthor }: Props) {
     const [comments, setComments] = useState<MomentComment[]>(() => loadMomentComments(post.id));
     const [showPhotoPromptEditor, setShowPhotoPromptEditor] = useState(false);
     const [photoPromptDraft, setPhotoPromptDraft] = useState("");
@@ -120,6 +121,30 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
 
     const authorName = getAuthorName(post.authorType, post.authorId);
     const authorAvatar = getAuthorAvatar(post.authorType, post.authorId);
+
+    const buildProfileTarget = (
+        authorType: "user" | "character" | "npc",
+        authorId: string,
+    ): MomentAuthorProfileTarget | null => {
+        if (authorType === "character" && authorId) {
+            return { authorType: "character", authorId };
+        }
+        if (authorType === "user") {
+            return { authorType: "user" };
+        }
+        return null;
+    };
+
+    const handleOpenAuthorProfile = (
+        authorType: "user" | "character" | "npc",
+        authorId: string,
+        event: React.MouseEvent,
+    ) => {
+        const target = buildProfileTarget(authorType, authorId);
+        if (!target || !onSelectAuthor) return;
+        event.stopPropagation();
+        onSelectAuthor(target);
+    };
 
     // Time formatting
     const timeAgo = formatTimeAgo(post.createdAt);
@@ -306,17 +331,43 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
         <div data-moment-post-id={post.id} className="feed-post relative border-b-[2.5px] border-[var(--c-card-border)] pb-5 mb-5 w-full bg-transparent px-4 pt-2">
             {/* Header row: avatar + name */}
             <div className="feed-post-header flex items-center gap-3 mb-3">
-                <div
-                    className="feed-post-author-avatar w-[40px] h-[40px] rounded-full shrink-0 bg-[var(--c-input)] overflow-hidden flex items-center justify-center"
-                >
-                    {authorAvatar ? (
-                        <img src={authorAvatar} alt="" className="feed-post-author-avatar-image w-full h-full object-cover" />
-                    ) : (
-                        <MomentDefaultAvatar />
-                    )}
-                </div>
+                {onSelectAuthor && (post.authorType === "character" || post.authorType === "user") ? (
+                    <button
+                        type="button"
+                        onClick={e => handleOpenAuthorProfile(post.authorType, post.authorId, e)}
+                        aria-label={`查看${authorName}的主页`}
+                        title={`查看${authorName}的主页`}
+                        className="feed-author-trigger feed-post-author-avatar w-[40px] h-[40px] rounded-full shrink-0 bg-[var(--c-input)] overflow-hidden flex items-center justify-center"
+                    >
+                        {authorAvatar ? (
+                            <img src={authorAvatar} alt="" className="feed-post-author-avatar-image w-full h-full object-cover" />
+                        ) : (
+                            <MomentDefaultAvatar />
+                        )}
+                    </button>
+                ) : (
+                    <div
+                        className="feed-post-author-avatar w-[40px] h-[40px] rounded-full shrink-0 bg-[var(--c-input)] overflow-hidden flex items-center justify-center"
+                    >
+                        {authorAvatar ? (
+                            <img src={authorAvatar} alt="" className="feed-post-author-avatar-image w-full h-full object-cover" />
+                        ) : (
+                            <MomentDefaultAvatar />
+                        )}
+                    </div>
+                )}
                 <div className="feed-post-author flex-1 flex items-center gap-1">
-                    <span className="feed-post-author-name ts-16 font-medium text-[var(--c-text-title)]">{authorName}</span>
+                    {onSelectAuthor && (post.authorType === "character" || post.authorType === "user") ? (
+                        <button
+                            type="button"
+                            onClick={e => handleOpenAuthorProfile(post.authorType, post.authorId, e)}
+                            className="feed-author-trigger feed-post-author-name ts-16 font-medium text-[var(--c-text-title)]"
+                        >
+                            {authorName}
+                        </button>
+                    ) : (
+                        <span className="feed-post-author-name ts-16 font-medium text-[var(--c-text-title)]">{authorName}</span>
+                    )}
                 </div>
                 <button
                     ref={postActionsBtnRef}
@@ -627,18 +678,43 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
                                             className="feed-comment-row flex items-start gap-2 cursor-pointer"
                                             onClick={(event) => handleCommentPress(root, event)}
                                         >
-                                            <div
-                                                className="feed-comment-avatar feed-comment-avatar-root w-[32px] h-[32px] rounded-full shrink-0 bg-[var(--c-input)] overflow-hidden flex items-center justify-center"
-                                            >
-                                                {rootAvatar ? (
-                                                    <img src={rootAvatar} alt="" className="feed-comment-avatar-image w-full h-full object-cover" />
-                                                ) : (
-                                                    <MomentDefaultAvatar />
-                                                )}
-                                            </div>
+                                            {onSelectAuthor && (root.authorType === "character" || root.authorType === "user") ? (
+                                                <button
+                                                    type="button"
+                                                    onClick={e => handleOpenAuthorProfile(root.authorType, root.authorId, e)}
+                                                    aria-label={`查看${rootName}的主页`}
+                                                    className="feed-author-trigger feed-comment-avatar feed-comment-avatar-root w-[32px] h-[32px] rounded-full shrink-0 bg-[var(--c-input)] overflow-hidden flex items-center justify-center"
+                                                >
+                                                    {rootAvatar ? (
+                                                        <img src={rootAvatar} alt="" className="feed-comment-avatar-image w-full h-full object-cover" />
+                                                    ) : (
+                                                        <MomentDefaultAvatar />
+                                                    )}
+                                                </button>
+                                            ) : (
+                                                <div
+                                                    className="feed-comment-avatar feed-comment-avatar-root w-[32px] h-[32px] rounded-full shrink-0 bg-[var(--c-input)] overflow-hidden flex items-center justify-center"
+                                                >
+                                                    {rootAvatar ? (
+                                                        <img src={rootAvatar} alt="" className="feed-comment-avatar-image w-full h-full object-cover" />
+                                                    ) : (
+                                                        <MomentDefaultAvatar />
+                                                    )}
+                                                </div>
+                                            )}
                                             <div className="feed-comment-content min-w-0 flex-1 ts-14 leading-[1.8] break-words">
                                                 <div className="feed-comment-main flex flex-col gap-[1px]">
-                                                    <div className="feed-comment-author text-[var(--c-text)] opacity-70">{rootName}</div>
+                                                    {onSelectAuthor && (root.authorType === "character" || root.authorType === "user") ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={e => handleOpenAuthorProfile(root.authorType, root.authorId, e)}
+                                                            className="feed-author-trigger feed-comment-author self-start text-left text-[var(--c-text)] opacity-70"
+                                                        >
+                                                            {rootName}
+                                                        </button>
+                                                    ) : (
+                                                        <div className="feed-comment-author text-[var(--c-text)] opacity-70">{rootName}</div>
+                                                    )}
                                                     <div className="feed-comment-body ts-15 leading-[1.55] text-[var(--c-text-title)]">
                                                         {rootReplyName && (
                                                             <>
@@ -712,18 +788,43 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
                                                             className="feed-comment feed-comment-child flex items-start gap-2 cursor-pointer"
                                                             onClick={(event) => handleCommentPress(reply, event)}
                                                         >
-                                                            <div
-                                                                className="feed-comment-avatar feed-comment-avatar-child w-[22px] h-[22px] rounded-full shrink-0 bg-[var(--c-input)] overflow-hidden flex items-center justify-center mt-[2px]"
-                                                            >
-                                                                {replyAvatar ? (
-                                                                    <img src={replyAvatar} alt="" className="feed-comment-avatar-image w-full h-full object-cover" />
-                                                                ) : (
-                                                                    <MomentDefaultAvatar />
-                                                                )}
-                                                            </div>
+                                                            {onSelectAuthor && (reply.authorType === "character" || reply.authorType === "user") ? (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={e => handleOpenAuthorProfile(reply.authorType, reply.authorId, e)}
+                                                                    aria-label={`查看${replyName}的主页`}
+                                                                    className="feed-author-trigger feed-comment-avatar feed-comment-avatar-child w-[22px] h-[22px] rounded-full shrink-0 bg-[var(--c-input)] overflow-hidden flex items-center justify-center mt-[2px]"
+                                                                >
+                                                                    {replyAvatar ? (
+                                                                        <img src={replyAvatar} alt="" className="feed-comment-avatar-image w-full h-full object-cover" />
+                                                                    ) : (
+                                                                        <MomentDefaultAvatar />
+                                                                    )}
+                                                                </button>
+                                                            ) : (
+                                                                <div
+                                                                    className="feed-comment-avatar feed-comment-avatar-child w-[22px] h-[22px] rounded-full shrink-0 bg-[var(--c-input)] overflow-hidden flex items-center justify-center mt-[2px]"
+                                                                >
+                                                                    {replyAvatar ? (
+                                                                        <img src={replyAvatar} alt="" className="feed-comment-avatar-image w-full h-full object-cover" />
+                                                                    ) : (
+                                                                        <MomentDefaultAvatar />
+                                                                    )}
+                                                                </div>
+                                                            )}
                                                             <div className="feed-comment-content min-w-0 flex-1 ts-14 leading-[1.8] break-words">
                                                                 <div className="feed-comment-main flex flex-col gap-[1px]">
-                                                                    <div className="feed-comment-author text-[var(--c-text)] opacity-70">{replyName}</div>
+                                                                    {onSelectAuthor && (reply.authorType === "character" || reply.authorType === "user") ? (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={e => handleOpenAuthorProfile(reply.authorType, reply.authorId, e)}
+                                                                            className="feed-author-trigger feed-comment-author self-start text-left text-[var(--c-text)] opacity-70"
+                                                                        >
+                                                                            {replyName}
+                                                                        </button>
+                                                                    ) : (
+                                                                        <div className="feed-comment-author text-[var(--c-text)] opacity-70">{replyName}</div>
+                                                                    )}
                                                                     <div className="feed-comment-body ts-15 leading-[1.55] text-[var(--c-text-title)]">
                                                                         {replyTargetName && (
                                                                             <>
