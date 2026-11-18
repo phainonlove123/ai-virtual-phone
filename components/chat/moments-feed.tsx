@@ -1,13 +1,15 @@
 "use client";
 
-import { useState, useEffect, useCallback, useLayoutEffect, useRef } from "react";
+import { useState, useEffect, useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import { getAllPosts, deleteMomentPost, getUnreadMomentsNotifications, saveMomentsLastSeen, addMomentComment } from "@/lib/moments-storage";
 import { loadChatContacts } from "@/lib/chat-storage";
+import { loadCharacters } from "@/lib/character-storage";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import { saveChatImageToIndexedDB, getChatImageFromIndexedDB } from "@/lib/chat-asset-storage";
-import type { MomentComment, MomentPost } from "@/lib/moments-types";
+import type { MomentAuthorProfileTarget, MomentComment, MomentPost } from "@/lib/moments-types";
 import { MomentPostCard } from "./moment-post-card";
 import { MomentsCompose } from "./moments-compose";
+import { MomentsAuthorProfile } from "./moments-author-profile";
 import { ConfirmDialog } from "@/components/ui/modal";
 import { PageShell } from "@/components/ui/page-shell";
 import { AlertCircle } from "lucide-react";
@@ -73,6 +75,26 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
     const [activeComposer, setActiveComposer] = useState<ActiveMomentComposer | null>(null);
     const [composerText, setComposerText] = useState("");
     const composerInputRef = useRef<HTMLTextAreaElement>(null);
+    const [profileStack, setProfileStack] = useState<MomentAuthorProfileTarget[]>([]);
+    const activeProfile = profileStack[profileStack.length - 1] ?? null;
+
+    const openAuthorProfile = useCallback((target: MomentAuthorProfileTarget) => {
+        setProfileStack(prev => {
+            const top = prev[prev.length - 1];
+            if (
+                top
+                && top.authorType === target.authorType
+                && (top.authorType === "user" || (target.authorType === "character" && top.authorId === target.authorId))
+            ) {
+                return prev;
+            }
+            return [...prev, target];
+        });
+    }, []);
+
+    const closeTopProfile = useCallback(() => {
+        setProfileStack(prev => prev.slice(0, -1));
+    }, []);
     const loadMoreRestoreRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
     const loadMoreAnchorRef = useRef<MomentScrollAnchorSnapshot | null>(null);
     const loadMoreResizeObserverRef = useRef<ResizeObserver | null>(null);
@@ -313,13 +335,56 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
         };
     }, [refreshPosts]);
 
-    // Hide tab bar only when the full compose page is open.
+    // Hide tab bar when compose modal or author profile subpage is open.
     useEffect(() => {
-        window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: showCompose }));
+        const shouldHide = showCompose || profileStack.length > 0;
+        window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: shouldHide }));
         return () => {
             window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false }));
         };
-    }, [showCompose]);
+    }, [showCompose, profileStack.length]);
+
+    const characterQuickEntries = useMemo(() => {
+        const statsByChar = new Map<string, { count: number; latestAt: number }>();
+        for (const post of posts) {
+            if (post.authorType !== "character") continue;
+            const ts = Date.parse(post.createdAt) || 0;
+            const prev = statsByChar.get(post.authorId);
+            if (!prev) {
+                statsByChar.set(post.authorId, { count: 1, latestAt: ts });
+            } else {
+                statsByChar.set(post.authorId, {
+                    count: prev.count + 1,
+                    latestAt: Math.max(prev.latestAt, ts),
+                });
+            }
+        }
+
+        const charsById = new Map(loadCharacters().map(c => [c.id, c]));
+        const contacts = loadChatContacts();
+        const entries = contacts
+            .map(contact => {
+                const char = charsById.get(contact.characterId);
+                if (!char) return null;
+                const stat = statsByChar.get(char.id);
+                return {
+                    id: char.id,
+                    name: char.name,
+                    avatar: char.avatar,
+                    postCount: stat?.count ?? 0,
+                    latestAt: stat?.latestAt ?? 0,
+                };
+            })
+            .filter((item): item is NonNullable<typeof item> => item !== null);
+
+        entries.sort((a, b) => {
+            if (b.latestAt !== a.latestAt) return b.latestAt - a.latestAt;
+            if (b.postCount !== a.postCount) return b.postCount - a.postCount;
+            return a.name.localeCompare(b.name, "zh-Hans-CN");
+        });
+
+        return entries;
+    }, [posts]);
 
 
     const handleDeleteConfirm = () => {
@@ -404,58 +469,6 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
                     onClose={() => setShowCompose(false)}
                     onPublished={handlePublished}
                 />
-            ) : activeComposer ? (
-                <div className="feed-comment-modal-layer" data-ui="modal">
-                    <button
-                        type="button"
-                        className="feed-comment-modal-backdrop"
-                        aria-label="关闭评论输入"
-                        onClick={closeComposer}
-                    />
-                    <div
-                        className="feed-comment-modal-dialog"
-                        data-ui="modal-dialog"
-                        role="dialog"
-                        aria-modal="true"
-                        aria-label={activeComposer.replyTo ? `回复 ${activeComposer.replyTo.name}` : "发表评论"}
-                    >
-                        <div className="feed-comment-modal-title">
-                            {activeComposer.replyTo ? `回复 ${activeComposer.replyTo.name}` : "发表评论"}
-                        </div>
-                        <textarea
-                            ref={composerInputRef}
-                            value={composerText}
-                            onChange={e => setComposerText(e.target.value)}
-                            onKeyDown={e => {
-                                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                                    e.preventDefault();
-                                    submitComposer();
-                                } else if (e.key === "Escape") {
-                                    closeComposer();
-                                }
-                            }}
-                            placeholder={activeComposer.replyTo ? `回复 ${activeComposer.replyTo.name}` : "说点什么吧"}
-                            className="feed-comment-modal-input"
-                        />
-                        <div className="feed-comment-modal-actions">
-                            <button
-                                type="button"
-                                className="feed-comment-modal-cancel"
-                                onClick={closeComposer}
-                            >
-                                取消
-                            </button>
-                            <button
-                                type="button"
-                                className="feed-comment-modal-send"
-                                disabled={!composerText.trim()}
-                                onClick={submitComposer}
-                            >
-                                发送
-                            </button>
-                        </div>
-                    </div>
-                </div>
             ) : undefined}
         >
                 {/* Cover card + avatar wrapper */}
@@ -492,13 +505,19 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
                         style={{ paddingTop: "calc(var(--page-header-safe-top, 48px) + var(--page-header-content-height, 54px) + 160px)" }}
                     >
                         {/* Avatar */}
-                        <div className="feed-profile-avatar w-[72px] h-[72px] rounded-full border-[3px] border-[var(--c-page-body-bg)] bg-[var(--c-input)] overflow-hidden flex items-center justify-center translate-x-[2px] pointer-events-auto">
+                        <button
+                            type="button"
+                            onClick={() => openAuthorProfile({ authorType: "user" })}
+                            aria-label="查看我的全部动态"
+                            title="查看我的全部动态"
+                            className="feed-author-trigger feed-profile-avatar w-[72px] h-[72px] rounded-full border-[3px] border-[var(--c-page-body-bg)] bg-[var(--c-input)] overflow-hidden flex items-center justify-center translate-x-[2px] pointer-events-auto"
+                        >
                             {userIdentity?.avatarUrl ? (
                                 <img src={userIdentity.avatarUrl} alt="" className="feed-profile-avatar-image w-full h-full object-cover" />
                             ) : (
                                 <span className="feed-profile-avatar-fallback ts-24 text-[var(--c-icon)] font-bold">{(userIdentity?.name ?? "我")[0]}</span>
                             )}
-                        </div>
+                        </button>
                         
                         {/* Name and Flex Data */}
                         <div className="feed-profile-info flex flex-col gap-1 mt-3 ml-[6px] pointer-events-auto">
@@ -540,6 +559,33 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
                     </button>
                 )}
 
+                {/* Quick character moments directory */}
+                {characterQuickEntries.length > 0 && (
+                    <div className="feed-author-strip" aria-label="角色主页列表">
+                        {characterQuickEntries.map(entry => (
+                            <button
+                                key={entry.id}
+                                type="button"
+                                className="feed-author-chip"
+                                onClick={() => openAuthorProfile({ authorType: "character", authorId: entry.id })}
+                                title={`查看 ${entry.name} 的主页`}
+                            >
+                                <span className="feed-author-chip-avatar-wrap">
+                                    {entry.avatar ? (
+                                        <img src={entry.avatar} alt={entry.name} className="feed-author-chip-avatar" />
+                                    ) : (
+                                        <img src="/images/default-moment-avatar.png" alt={entry.name} className="feed-author-chip-avatar" />
+                                    )}
+                                    {entry.postCount > 0 && (
+                                        <span className="feed-author-chip-count">{entry.postCount > 99 ? "99+" : entry.postCount}</span>
+                                    )}
+                                </span>
+                                <span className="feed-author-chip-name">{entry.name}</span>
+                            </button>
+                        ))}
+                    </div>
+                )}
+
                 {/* Posts list */}
                 {posts.length === 0 ? (
                     <div className="feed-empty-state py-10 text-center text-[var(--c-icon)] ts-14">
@@ -554,6 +600,7 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
                             onRequestDelete={setConfirmDeleteId}
                             onOpenCommentComposer={openCommentComposer}
                             onOpenReplyComposer={openReplyComposer}
+                            onSelectAuthor={openAuthorProfile}
                         />
                     ))
                 )}
@@ -572,20 +619,6 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
                     </div>
                 )}
 
-
-            {/* Delete confirm dialog */}
-            {confirmDeleteId && (
-                <ConfirmDialog
-                    title="确定删除这条朋友圈吗？"
-                    message="删除后无法恢复，评论也会一并删除。"
-                    icon={AlertCircle}
-                    variant="danger"
-                    confirmLabel="删除"
-                    cancelLabel="取消"
-                    onConfirm={handleDeleteConfirm}
-                    onCancel={() => setConfirmDeleteId(null)}
-                />
-            )}
 
             {/* Notification detail modal */}
             {showNotifModal && (
@@ -616,6 +649,88 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
             )}
 
         </PageShell>
+
+        {activeProfile && (
+            <MomentsAuthorProfile
+                target={activeProfile}
+                posts={posts}
+                userCoverUrl={coverUrl}
+                userSignature={signature}
+                onBack={closeTopProfile}
+                onUpdate={refreshPosts}
+                onRequestDelete={setConfirmDeleteId}
+                onOpenCommentComposer={openCommentComposer}
+                onOpenReplyComposer={openReplyComposer}
+                onSelectAuthor={openAuthorProfile}
+            />
+        )}
+
+        {activeComposer && (
+            <div className="feed-comment-modal-layer" data-ui="modal">
+                <button
+                    type="button"
+                    className="feed-comment-modal-backdrop"
+                    aria-label="关闭评论输入"
+                    onClick={closeComposer}
+                />
+                <div
+                    className="feed-comment-modal-dialog"
+                    data-ui="modal-dialog"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label={activeComposer.replyTo ? `回复 ${activeComposer.replyTo.name}` : "发表评论"}
+                >
+                    <div className="feed-comment-modal-title">
+                        {activeComposer.replyTo ? `回复 ${activeComposer.replyTo.name}` : "发表评论"}
+                    </div>
+                    <textarea
+                        ref={composerInputRef}
+                        value={composerText}
+                        onChange={e => setComposerText(e.target.value)}
+                        onKeyDown={e => {
+                            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                                e.preventDefault();
+                                submitComposer();
+                            } else if (e.key === "Escape") {
+                                closeComposer();
+                            }
+                        }}
+                        placeholder={activeComposer.replyTo ? `回复 ${activeComposer.replyTo.name}` : "说点什么吧"}
+                        className="feed-comment-modal-input"
+                    />
+                    <div className="feed-comment-modal-actions">
+                        <button
+                            type="button"
+                            className="feed-comment-modal-cancel"
+                            onClick={closeComposer}
+                        >
+                            取消
+                        </button>
+                        <button
+                            type="button"
+                            className="feed-comment-modal-send"
+                            disabled={!composerText.trim()}
+                            onClick={submitComposer}
+                        >
+                            发送
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {confirmDeleteId && (
+            <ConfirmDialog
+                title="确定删除这条朋友圈吗？"
+                message="删除后无法恢复，评论也会一并删除。"
+                icon={AlertCircle}
+                variant="danger"
+                confirmLabel="删除"
+                cancelLabel="取消"
+                onConfirm={handleDeleteConfirm}
+                onCancel={() => setConfirmDeleteId(null)}
+            />
+        )}
         </>
     );
 }
