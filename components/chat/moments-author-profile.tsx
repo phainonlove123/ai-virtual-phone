@@ -32,6 +32,8 @@ type Props = {
     onOpenCommentComposer: (post: MomentPost) => void;
     onOpenReplyComposer: (post: MomentPost, comment: MomentComment, replyName: string) => void;
     onSelectAuthor: (target: MomentAuthorProfileTarget) => void;
+    onOpenChat?: (characterId: string) => void;
+    rightAction?: React.ReactNode;
 };
 
 export function MomentsAuthorProfile({
@@ -45,6 +47,8 @@ export function MomentsAuthorProfile({
     onOpenCommentComposer,
     onOpenReplyComposer,
     onSelectAuthor,
+    onOpenChat,
+    rightAction,
 }: Props) {
     const isCharacter = target.authorType === "character";
     const targetCharacterId = isCharacter ? target.authorId : undefined;
@@ -230,6 +234,10 @@ export function MomentsAuthorProfile({
 
     const handleOpenChat = () => {
         if (!character) return;
+        if (onOpenChat) {
+            onOpenChat(character.id);
+            return;
+        }
         const session = createOrGetSession(character.id);
         window.dispatchEvent(new CustomEvent(CHAT_OPEN_SESSION_EVENT, { detail: { sessionId: session.id } }));
     };
@@ -260,6 +268,7 @@ export function MomentsAuthorProfile({
         <PageShell
             title={displayName}
             onBack={onBack}
+            rightAction={rightAction}
             className={`moments-feed-page moments-profile-page absolute inset-0 z-30 ${headerScrolled ? "is-scrolled" : ""}`}
             bodyRef={scrollRef}
         >

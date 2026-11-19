@@ -1,9 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback, useLayoutEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useLayoutEffect, useRef } from "react";
 import { getAllPosts, deleteMomentPost, getUnreadMomentsNotifications, saveMomentsLastSeen, addMomentComment } from "@/lib/moments-storage";
 import { loadChatContacts } from "@/lib/chat-storage";
-import { loadCharacters } from "@/lib/character-storage";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import { saveChatImageToIndexedDB, getChatImageFromIndexedDB } from "@/lib/chat-asset-storage";
 import type { MomentAuthorProfileTarget, MomentComment, MomentPost } from "@/lib/moments-types";
@@ -344,47 +343,7 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
         };
     }, [showCompose, profileStack.length]);
 
-    const characterQuickEntries = useMemo(() => {
-        const statsByChar = new Map<string, { count: number; latestAt: number }>();
-        for (const post of posts) {
-            if (post.authorType !== "character") continue;
-            const ts = Date.parse(post.createdAt) || 0;
-            const prev = statsByChar.get(post.authorId);
-            if (!prev) {
-                statsByChar.set(post.authorId, { count: 1, latestAt: ts });
-            } else {
-                statsByChar.set(post.authorId, {
-                    count: prev.count + 1,
-                    latestAt: Math.max(prev.latestAt, ts),
-                });
-            }
-        }
 
-        const charsById = new Map(loadCharacters().map(c => [c.id, c]));
-        const contacts = loadChatContacts();
-        const entries = contacts
-            .map(contact => {
-                const char = charsById.get(contact.characterId);
-                if (!char) return null;
-                const stat = statsByChar.get(char.id);
-                return {
-                    id: char.id,
-                    name: char.name,
-                    avatar: char.avatar,
-                    postCount: stat?.count ?? 0,
-                    latestAt: stat?.latestAt ?? 0,
-                };
-            })
-            .filter((item): item is NonNullable<typeof item> => item !== null);
-
-        entries.sort((a, b) => {
-            if (b.latestAt !== a.latestAt) return b.latestAt - a.latestAt;
-            if (b.postCount !== a.postCount) return b.postCount - a.postCount;
-            return a.name.localeCompare(b.name, "zh-Hans-CN");
-        });
-
-        return entries;
-    }, [posts]);
 
 
     const handleDeleteConfirm = () => {
@@ -559,32 +518,7 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
                     </button>
                 )}
 
-                {/* Quick character moments directory */}
-                {characterQuickEntries.length > 0 && (
-                    <div className="feed-author-strip" aria-label="角色主页列表">
-                        {characterQuickEntries.map(entry => (
-                            <button
-                                key={entry.id}
-                                type="button"
-                                className="feed-author-chip"
-                                onClick={() => openAuthorProfile({ authorType: "character", authorId: entry.id })}
-                                title={`查看 ${entry.name} 的主页`}
-                            >
-                                <span className="feed-author-chip-avatar-wrap">
-                                    {entry.avatar ? (
-                                        <img src={entry.avatar} alt={entry.name} className="feed-author-chip-avatar" />
-                                    ) : (
-                                        <img src="/images/default-moment-avatar.png" alt={entry.name} className="feed-author-chip-avatar" />
-                                    )}
-                                    {entry.postCount > 0 && (
-                                        <span className="feed-author-chip-count">{entry.postCount > 99 ? "99+" : entry.postCount}</span>
-                                    )}
-                                </span>
-                                <span className="feed-author-chip-name">{entry.name}</span>
-                            </button>
-                        ))}
-                    </div>
-                )}
+
 
                 {/* Posts list */}
                 {posts.length === 0 ? (

@@ -36,6 +36,8 @@ import { CustomAppRunner } from "@/components/app-market/custom-app-runner";
 import { CustomAppForegroundBoundary } from "@/components/app-market/custom-app-failure";
 
 import { ChatSettingsPanel } from "./chat-settings-panel";
+import { ChatAvatarProfile } from "./chat-avatar-profile";
+import type { MomentAuthorProfileTarget } from "@/lib/moments-types";
 import { VoiceCallScreen } from "./voice-call-screen";
 import { VideoCallScreen } from "./video-call-screen";
 import { GroupCallScreen } from "./group-call-screen";
@@ -1121,6 +1123,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     const [customPlusActions, setCustomPlusActions] = useState<RegisteredCustomAppChatPlusAction[]>(() => loadCustomAppChatPlusActions());
     const [activeCustomChatPlus, setActiveCustomChatPlus] = useState<ActiveCustomChatPlus | null>(null);
     const [showSettings, setShowSettings] = useState(false);
+    const [avatarProfileTarget, setAvatarProfileTarget] = useState<MomentAuthorProfileTarget | null>(null);
+    const [, setSessionRev] = useState(0);
+    const avatarTapTimerRef = useRef<number | null>(null);
     const [showVoiceCall, setShowVoiceCall] = useState(false);
     const [showVideoCall, setShowVideoCall] = useState(false);
     const [callMinimized, setCallMinimized] = useState(false);
@@ -1336,7 +1341,13 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     const visibleMessagesRef = useRef<ChatMessage[]>([]);
     const hasMoreRef = useRef(false);
     const offlineGenerationInputRef = useRef("");
-    useEffect(() => () => { mountedRef.current = false; }, []);
+    useEffect(() => () => {
+        mountedRef.current = false;
+        if (avatarTapTimerRef.current !== null) {
+            window.clearTimeout(avatarTapTimerRef.current);
+            avatarTapTimerRef.current = null;
+        }
+    }, []);
     useEffect(() => { visibleMessagesRef.current = messages; }, [messages]);
     useEffect(() => { hasMoreRef.current = hasMore; }, [hasMore]);
     useChatBottomReserve(
@@ -1399,6 +1410,37 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         setActiveMessageId(null);
         setContextMenuAnchor(anchor);
         setActiveOfflineTarget(target);
+    };
+
+    const openCharacterAvatarProfile = useCallback((characterId?: string) => {
+        if (isMultiSelectMode) return;
+        const targetId = characterId || (!session.isGroup ? session.contactId : undefined);
+        if (!targetId) return;
+        setAvatarProfileTarget({ authorType: "character", authorId: targetId });
+    }, [isMultiSelectMode, session.contactId, session.isGroup]);
+
+    const openUserAvatarProfile = useCallback(() => {
+        if (isMultiSelectMode) return;
+        setAvatarProfileTarget({ authorType: "user" });
+    }, [isMultiSelectMode]);
+
+    const handleCharacterAvatarClick = (targetChar: Character | null | undefined) => {
+        if (isMultiSelectMode || !targetChar) return;
+        if (avatarTapTimerRef.current !== null) {
+            window.clearTimeout(avatarTapTimerRef.current);
+        }
+        avatarTapTimerRef.current = window.setTimeout(() => {
+            avatarTapTimerRef.current = null;
+            openCharacterAvatarProfile(targetChar.id);
+        }, 220);
+    };
+
+    const handleCharacterAvatarDoubleClick = (targetChar: Character | null | undefined) => {
+        if (avatarTapTimerRef.current !== null) {
+            window.clearTimeout(avatarTapTimerRef.current);
+            avatarTapTimerRef.current = null;
+        }
+        if (targetChar) sendRichMessage("poke", { pokeTarget: targetChar.name });
     };
 
     const getContextMenuInitialStyle = () => {
@@ -5409,7 +5451,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     } : undefined;
 
     return (
-        <div ref={wrapperRef} className={`session-${session.id} chat-room-wrapper page-shell inset-0 flex flex-col z-20`} style={chatRoomBackgroundStyle} {...(bgLoading ? { "data-loading": "" } : {})} {...(bgImageResolved ? { "data-has-bg-image": "" } : {})} {...(showSettings ? { "data-settings-open": "" } : {})}>
+        <div ref={wrapperRef} className={`session-${session.id} chat-room-wrapper page-shell inset-0 flex flex-col z-20`} style={chatRoomBackgroundStyle} {...(bgLoading ? { "data-loading": "" } : {})} {...(bgImageResolved ? { "data-has-bg-image": "" } : {})} {...(showSettings || avatarProfileTarget ? { "data-settings-open": "" } : {})}>
             {/* Custom CSS Injection for this session — scoped to prevent leaking */}
             {liveCSS && (
                 <SessionCustomCSS css={liveCSS} scope={`.session-${session.id}`} />
@@ -5493,7 +5535,13 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                             <div className="chat-offline-turn">
                                 <div className="chat-offline-entry" data-role="user" style={offlineDisplay.userContent.trim() ? undefined : { display: "none" }}>
                                     {/* 头像占位：默认 display:none（见 chat.css），供自定义 CSS 显示 */}
-                                    <div className="chat-offline-avatar" aria-hidden="true">
+                                    <div
+                                        className="chat-offline-avatar cursor-pointer"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            openUserAvatarProfile();
+                                        }}
+                                    >
                                         {userIdentity?.avatarUrl ? <img src={userIdentity.avatarUrl} alt="" /> : <User size={18} color="var(--c-text)" />}
                                     </div>
                                     <div className="chat-offline-label">你</div>
@@ -5523,7 +5571,13 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                 </div>
                                 <div className="chat-offline-entry" data-role="assistant">
                                     {/* 头像占位：默认 display:none（见 chat.css），供自定义 CSS 显示 */}
-                                    <div className="chat-offline-avatar" aria-hidden="true">
+                                    <div
+                                        className="chat-offline-avatar cursor-pointer"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            openCharacterAvatarProfile(character?.id);
+                                        }}
+                                    >
                                         {character?.avatar ? <img src={character.avatar} alt="" /> : <ChatFallbackAvatar />}
                                     </div>
                                     <div className="chat-offline-label-row">
@@ -5965,12 +6019,26 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                                             : character;
                                                         return (
                                                             <>
-                                                    <div onDoubleClick={() => {
-                                                        const targetChar = session.isGroup && msg.senderCharacterId
-                                                            ? groupCharMap.get(msg.senderCharacterId) || character
-                                                            : character;
-                                                        if (targetChar) sendRichMessage("poke", { pokeTarget: targetChar.name });
-                                                    }} className="w-[40px] h-[40px] rounded-[20px] bg-[var(--c-input)] overflow-hidden cursor-pointer">
+                                                    <div
+                                                        role="button"
+                                                        tabIndex={0}
+                                                        aria-label={`查看 ${senderChar?.name || "对方"} 的主页`}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            handleCharacterAvatarClick(senderChar);
+                                                        }}
+                                                        onDoubleClick={(e) => {
+                                                            e.stopPropagation();
+                                                            handleCharacterAvatarDoubleClick(senderChar);
+                                                        }}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === "Enter" || e.key === " ") {
+                                                                e.preventDefault();
+                                                                openCharacterAvatarProfile(senderChar?.id);
+                                                            }
+                                                        }}
+                                                        className="w-[40px] h-[40px] rounded-[20px] bg-[var(--c-input)] overflow-hidden cursor-pointer"
+                                                    >
                                                         {senderChar?.avatar ? (
                                                             <img src={senderChar.avatar} className="w-full h-full object-cover" alt="" />
                                                         ) : (
@@ -6051,7 +6119,22 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                             </button>
                                         )}
                                         {msg.role === "user" && !isEmptyBubble && (
-                                            <div className="chat-msg-avatar w-[40px] h-[40px] rounded-[20px] bg-[var(--c-page-body-bg)] shrink-0 flex items-center justify-center overflow-hidden">
+                                            <div
+                                                role="button"
+                                                tabIndex={0}
+                                                aria-label="查看我的主页"
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    openUserAvatarProfile();
+                                                }}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === "Enter" || e.key === " ") {
+                                                        e.preventDefault();
+                                                        openUserAvatarProfile();
+                                                    }
+                                                }}
+                                                className="chat-msg-avatar w-[40px] h-[40px] rounded-[20px] bg-[var(--c-page-body-bg)] shrink-0 flex items-center justify-center overflow-hidden cursor-pointer"
+                                            >
                                                 {userIdentity?.avatarUrl ? (
                                                     <img src={userIdentity.avatarUrl} alt="Me" className="w-full h-full object-cover rounded-[20px]" />
                                                 ) : (
@@ -6273,6 +6356,24 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     onConfirm={handleMultiDeleteConfirmed}
                     onCancel={() => setShowConfirmMultiDelete(false)}
                 />
+            )}
+
+            {/* Avatar Profile & Moments Homepage — portaled outside session-scoped CSS, preserves chat room mount */}
+            {avatarProfileTarget && wrapperRef.current?.parentElement && createPortal(
+                <div className="chat-settings-layer absolute inset-0 z-50">
+                    <ChatAvatarProfile
+                        target={avatarProfileTarget}
+                        session={session}
+                        onClose={() => setAvatarProfileTarget(null)}
+                        onSessionUpdated={() => setSessionRev(v => v + 1)}
+                        onOpenChatSettings={() => {
+                            setAvatarProfileTarget(null);
+                            setShowSettings(true);
+                        }}
+                        onToast={showChatToast}
+                    />
+                </div>,
+                wrapperRef.current.parentElement
             )}
 
             {/* Settings Panel — portaled outside session-scoped CSS, preserves chat room mount */}
