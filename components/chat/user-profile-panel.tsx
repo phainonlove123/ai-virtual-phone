@@ -32,6 +32,7 @@ import { armIdleReconnectBailout, armTimedWakeBailout, cancelBailoutKey, cancelB
 import { loadTimedWakeSchedules, makeTimedWakeId, removeTimedWakeSchedule, saveTimedWakeSchedule, type TimedWakeSchedule } from "@/lib/timed-wake-storage";
 import { IDLE_RECONNECT_MAX_CONSECUTIVE, loadIdleReconnectRules, removeIdleReconnectRule, upsertIdleReconnectRule, type IdleReconnectRule } from "@/lib/idle-reconnect-storage";
 import { addChatContact, createOrGetSession } from "@/lib/chat-storage";
+import { loadProactiveContactConfig, PROACTIVE_CONTACT_UPDATED_EVENT } from "@/lib/proactive-contact";
 import { kvGet, kvSet, kvRemove } from "@/lib/kv-db";
 import { formatWalletAmount, getWalletBalance, loadWalletState, WALLET_UPDATED_EVENT } from "@/lib/wallet-storage";
 import { ChatFallbackAvatar } from "./chat-fallback-avatar";
@@ -57,6 +58,7 @@ import {
     Send,
     X,
     SlidersHorizontal,
+    Sparkles,
     Sticker,
     ThumbsUp,
     Trash2,
@@ -163,6 +165,7 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
     const [showPushSettings, setShowPushSettings] = useState(false);
     const [enterToSendEnabled, setEnterToSendEnabled] = useState(false);
     const [callVibrationEnabled, setCallVibrationEnabled] = useState(true);
+    const [proactiveGlobalEnabled, setProactiveGlobalEnabled] = useState(() => loadProactiveContactConfig().globalEnabled);
     const [userStats, setUserStats] = useState({ chats: 0, moments: 0, visitors: 1234 });
     const [walletSummary, setWalletSummary] = useState(() => {
         const wallet = loadWalletState();
@@ -208,8 +211,13 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
                 cardCount: wallet.cards.length,
             });
         };
+        const syncProactive = () => setProactiveGlobalEnabled(loadProactiveContactConfig().globalEnabled);
         window.addEventListener(WALLET_UPDATED_EVENT, syncWallet);
-        return () => window.removeEventListener(WALLET_UPDATED_EVENT, syncWallet);
+        window.addEventListener(PROACTIVE_CONTACT_UPDATED_EVENT, syncProactive);
+        return () => {
+            window.removeEventListener(WALLET_UPDATED_EVENT, syncWallet);
+            window.removeEventListener(PROACTIVE_CONTACT_UPDATED_EVENT, syncProactive);
+        };
     }, []);
 
     const handleNotificationToggle = async (enabled: boolean) => {
@@ -408,11 +416,24 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
                     {/* 主动消息 */}
                     <div className="mx-4 mb-4 bg-[var(--c-card)] rounded-2xl px-4 py-1 flex flex-col"
                          style={{ boxShadow: "0 8px 24px rgba(0,0,0,0.025)" }}>
-                        <button className="flex items-center gap-3 py-3.5 w-full" onClick={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: true })); setShowFollowUpEditor(true); }}>
+                        <button
+                            className="flex items-center gap-3 py-3.5 w-full border-b border-[color-mix(in_srgb,var(--c-card-border)_20%,transparent)]"
+                            onClick={() => window.dispatchEvent(new CustomEvent("mascot-navigate", { detail: { app: "proactive_contact" } }))}
+                        >
+                            <Sparkles size={18} className="text-[var(--c-icon-active,#2f80ed)]" strokeWidth={1.6}/>
+                            <div className="flex flex-col flex-1 text-left gap-0.5">
+                                <span className="ts-14 font-semibold text-[var(--c-text-title)]">主动联系控制中心</span>
+                                <span className="ts-11 text-[var(--c-text)] opacity-70">
+                                    统一总开关、分角色频率与自动变频（{proactiveGlobalEnabled ? "已开启" : "已全局静音"}）
+                                </span>
+                            </div>
+                            <ChevronRight size={16} className="text-[var(--c-icon)] opacity-50" />
+                        </button>
+                        <button className="flex items-center gap-3 py-3.5 w-full border-b border-[color-mix(in_srgb,var(--c-card-border)_20%,transparent)]" onClick={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: true })); setShowFollowUpEditor(true); }}>
                             <Send size={18} className="text-[var(--c-icon)] opacity-70" strokeWidth={1.25}/>
                             <div className="flex flex-col flex-1 text-left gap-0.5">
                                 <span className="ts-14 font-semibold text-[var(--c-text-title)]">追发规则与延迟控制</span>
-                                <span className="ts-11 text-[var(--c-text)] opacity-70">设定角色的主动回复频率与时间间隔</span>
+                                <span className="ts-11 text-[var(--c-text)] opacity-70">高级微调：焦虑字段名、阈值与等待区间</span>
                             </div>
                             <ChevronRight size={16} className="text-[var(--c-icon)] opacity-50" />
                         </button>
@@ -420,7 +441,7 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
                             <Satellite size={18} className="text-[var(--c-icon)] opacity-70" strokeWidth={1.25}/>
                             <div className="flex flex-col flex-1 text-left gap-0.5">
                                 <span className="ts-14 font-semibold text-[var(--c-text-title)]">离线推送与定时消息</span>
-                                <span className="ts-11 text-[var(--c-text)] opacity-70">关掉后台也能收到推送、安静时段、定时主动消息</span>
+                                <span className="ts-11 text-[var(--c-text)] opacity-70">个人云部署、系统推送通道、安静时段与定时队列</span>
                             </div>
                             <ChevronRight size={16} className="text-[var(--c-icon)] opacity-50" />
                         </button>
@@ -553,6 +574,20 @@ function FollowUpSettingsEditor({ onBack }: { onBack: () => void }) {
     return (
         <PageShell title="追发设置" onBack={onBack} className="absolute inset-0 z-[100]">
             <div className="page-menu profile-settings-menu">
+                <div className="menu-group">
+                    <button
+                        type="button"
+                        className="menu-item"
+                        onClick={() => window.dispatchEvent(new CustomEvent("mascot-navigate", { detail: { app: "proactive_contact" } }))}
+                    >
+                        <ProfileSettingsIcon icon={Sparkles} color={BINDING_ACCENTS.api} />
+                        <div className="menu-label-group">
+                            <span className="menu-label">前往「主动联系」控制中心</span>
+                            <span className="menu-desc">一键总开关、分角色开关、档位切换与自动变频</span>
+                        </div>
+                        <ChevronRight size={16} className="text-[var(--c-icon)] opacity-50" />
+                    </button>
+                </div>
                 <p className="menu-group-desc mx-2">
                     延迟计算：焦虑值={config.anxietyThreshold} → {config.anxietyMaxDelay}秒，焦虑值=100 → {config.anxietyMinDelay}秒，中间线性插值。焦虑值&lt;{config.anxietyThreshold}时不追发。
                 </p>
@@ -1354,6 +1389,20 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
       <>
         <PageShell title="离线推送" onBack={onBack} className="absolute inset-0 z-[100]">
             <div className="page-menu profile-settings-menu">
+                <div className="menu-group">
+                    <button
+                        type="button"
+                        className="menu-item"
+                        onClick={() => window.dispatchEvent(new CustomEvent("mascot-navigate", { detail: { app: "proactive_contact" } }))}
+                    >
+                        <ProfileSettingsIcon icon={Sparkles} color={BINDING_ACCENTS.api} />
+                        <div className="menu-label-group">
+                            <span className="menu-label">前往「主动联系」控制中心</span>
+                            <span className="menu-desc">分角色主动联系开关、自动变频与一键同步预约</span>
+                        </div>
+                        <ChevronRight size={16} className="text-[var(--c-icon)] opacity-50" />
+                    </button>
+                </div>
                 {(
                     <>
                         <p className="menu-group-desc mx-2">运行位置</p>

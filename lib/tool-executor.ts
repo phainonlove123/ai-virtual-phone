@@ -72,6 +72,7 @@ import {
     searchLocalDataRecords,
 } from "./local-data-fs";
 import { makeTimedWakeId, saveTimedWakeSchedule } from "./timed-wake-storage";
+import { isCharacterProactiveEnabled } from "./proactive-contact";
 import { resolveUserIdentity } from "./settings-storage";
 import { attachAbortSignal, isAbortError, throwIfAborted } from "./abort-utils";
 import {
@@ -2989,6 +2990,15 @@ async function executeTimedWakeTool(call: ToolCall, context?: ToolExecutionConte
             success: false,
             error: "当前场景暂不支持稍后主动联系",
             userNotice: "当前场景暂不支持稍后主动联系",
+        };
+    }
+
+    if (!isCharacterProactiveEnabled(context.characterId)) {
+        return {
+            name: "稍后主动联系",
+            success: false,
+            error: "该角色的主动联系已在「主动联系」控制中心关闭",
+            userNotice: "该角色的主动联系已关闭",
         };
     }
 

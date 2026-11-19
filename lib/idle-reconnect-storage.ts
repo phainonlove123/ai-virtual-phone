@@ -66,13 +66,18 @@ export function removeIdleReconnectRule(id: string): void {
 }
 
 /** 记一次触发（本地触发或服务端触发回端合并时都调用）。 */
-export function markIdleReconnectFired(id: string, firedAtMs: number): void {
+export function markIdleReconnectFired(
+    id: string,
+    firedAtMs: number,
+    maxConsecutive = IDLE_RECONNECT_MAX_CONSECUTIVE,
+): void {
     const rules = loadIdleReconnectRules();
     const rule = rules.find(item => item.id === id);
     if (!rule) return;
+    const cap = Math.max(1, Math.min(10, Math.round(maxConsecutive)));
     if (!rule.lastFiredAt || firedAtMs > rule.lastFiredAt) {
         rule.lastFiredAt = firedAtMs;
-        rule.consecutiveCount = Math.min(IDLE_RECONNECT_MAX_CONSECUTIVE, rule.consecutiveCount + 1);
+        rule.consecutiveCount = Math.min(cap, rule.consecutiveCount + 1);
         saveRules(rules);
     }
 }
