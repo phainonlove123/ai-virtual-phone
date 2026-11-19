@@ -27,8 +27,19 @@ import {
     markIdleReconnectFired,
     resetIdleReconnectForSession,
     suppressIdleReconnectUntil,
+    upsertIdleReconnectRule,
     type IdleReconnectRule,
 } from "./idle-reconnect-storage";
+import {
+    getCharacterMaxConsecutive,
+    getEffectiveIdleIntervalMinutes,
+    getFollowUpDelayMultiplierForSession,
+    isCharacterProactiveEnabled,
+    isFollowUpAllowedForSession,
+    isGlobalProactiveEnabled,
+    isIdleReconnectAllowedForCharacter,
+    loadProactiveContactConfig,
+} from "./proactive-contact";
 import { loadFollowUpConfig } from "./settings-storage";
 import { parseAIResponse } from "./rich-message-parser";
 import type { ParsedMessagePart } from "./rich-message-parser";
@@ -193,12 +204,21 @@ export function scheduleFollowUp(sessionId: string, count: number, stateValues?:
         return;
     }
 
+    const session = loadChatSessions().find(s => s.id === sessionId);
+    if (session && !isFollowUpAllowedForSession(session)) {
+        clearFollowUpSchedule(sessionId);
+        cancelFollowUpBailout(sessionId);
+        return;
+    }
+
     // Linear interpolation: threshold → maxDelay, 100 → minDelay
     const range = 100 - config.anxietyThreshold;
     const t = range > 0 ? (anxietyEntry.value - config.anxietyThreshold) / range : 1;
-    const delaySec = Math.round(config.anxietyMaxDelay + t * (config.anxietyMinDelay - config.anxietyMaxDelay));
+    const rawDelaySec = config.anxietyMaxDelay + t * (config.anxietyMinDelay - config.anxietyMaxDelay);
+    const multiplier = getFollowUpDelayMultiplierForSession(session);
+    const delaySec = Math.max(5, Math.min(1800, Math.round(rawDelaySec * multiplier)));
     const fireAt = Date.now() + delaySec * 1000;
-    console.log(`[FollowUp] Anxiety-driven: value=${anxietyEntry.value}, delay=${delaySec}s, session=${sessionId}, count=${count}`);
+    console.log(`[FollowUp] Anxiety-driven: value=${anxietyEntry.value}, delay=${delaySec}s (x${multiplier}), session=${sessionId}, count=${count}`);
     saveFollowUpSchedule({ sessionId, fireAt, count, delaySec });
     // 离线推送兜底：把本轮追问的完整请求快照预约到服务端，App 被杀时由服务端接管
     void armFollowUpBailout(sessionId, count, delaySec, fireAt);
@@ -250,9 +270,25 @@ export async function requestBackgroundChatReply(sessionId: string): Promise<{ o
 export function cancelFollowUp(sessionId: string) {
     clearFollowUpSchedule(sessionId);
     cancelFollowUpBailout(sessionId);
-    // 用户发了消息：冷场重连计数清零，按新周期重挂服务端预约
+    // 用户发了消息：冷场重连计数清零，按自适应频率重算周期并重挂服务端预约
     const idleRule = resetIdleReconnectForSession(sessionId);
-    if (idleRule) void armIdleReconnectBailout({ ...idleRule, consecutiveCount: 0 });
+    if (idleRule) {
+        if (!isIdleReconnectAllowedForCharacter(idleRule.characterId)) {
+            void cancelBailoutPrefix(`idle:${idleRule.id}:`);
+        } else {
+            const nextMinutes = getEffectiveIdleIntervalMinutes(
+                idleRule.characterId,
+                idleRule.sessionId,
+                0,
+                idleRule.intervalMinutes,
+            );
+            const refreshedRule = nextMinutes !== idleRule.intervalMinutes
+                ? { ...idleRule, consecutiveCount: 0, intervalMinutes: nextMinutes }
+                : { ...idleRule, consecutiveCount: 0 };
+            if (nextMinutes !== idleRule.intervalMinutes) upsertIdleReconnectRule(refreshedRule);
+            void armIdleReconnectBailout(refreshedRule);
+        }
+    }
     // If an API call is already in-flight, mark it for cancellation
     if (firingSet.has(sessionId)) {
         cancelledWhileFiring.add(sessionId);
@@ -378,6 +414,7 @@ function pollTimedWakeSchedules(now: number) {
         if (sched.fireAt > now) continue;
         if (timedWakeFiringSet.has(sched.id)) continue;
         if (now < scheduledOutboxGraceUntil) continue;
+        if (sched.source !== "user" && !isCharacterProactiveEnabled(sched.characterId)) continue;
         console.log(`[TimedWake] Firing now for session=${sched.sessionId}`);
         fireTimedWake(sched);
     }
@@ -386,6 +423,9 @@ function pollTimedWakeSchedules(now: number) {
 function pollMenstrualPeriodCare(now: number) {
     if (now - lastPeriodCarePollAt < PERIOD_CARE_POLL_INTERVAL_MS) return;
     lastPeriodCarePollAt = now;
+
+    const proactiveConfig = loadProactiveContactConfig();
+    if (!proactiveConfig.globalEnabled || !proactiveConfig.periodCareEnabled) return;
 
     const config = loadMenstrualConfig();
     if (!config.periodCareEnabled || config.periodCareCharacterIds.length === 0) return;
@@ -433,6 +473,7 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
         const sessions = loadChatSessions();
         const session = sessions.find(s => s.id === sched.sessionId);
         if (!session) return;
+        if (!isFollowUpAllowedForSession(session)) return;
 
         const latestMessages = loadChatMessages(session.id);
 
@@ -541,8 +582,10 @@ const IDLE_RECONNECT_POLL_INTERVAL_MS = 60_000;
 function pollIdleReconnect(now: number) {
     if (now - lastIdleReconnectPollAt < IDLE_RECONNECT_POLL_INTERVAL_MS) return;
     lastIdleReconnectPollAt = now;
+    if (!isGlobalProactiveEnabled()) return;
 
     for (const rule of loadIdleReconnectRules()) {
+        if (!isIdleReconnectAllowedForCharacter(rule.characterId)) continue;
         if (idleReconnectFiringSet.has(rule.id)) continue;
         if (firingSet.has(rule.sessionId)) continue;
         // 追问链正在管这个会话时不叠加打扰
@@ -553,10 +596,17 @@ function pollIdleReconnect(now: number) {
         if (!lastUser) continue;
         const lastUserAt = new Date(lastUser.createdAt).getTime();
 
+        const maxConsecutive = getCharacterMaxConsecutive(rule.characterId);
         const effectiveConsecutive = rule.lastFiredAt && rule.lastFiredAt > lastUserAt ? rule.consecutiveCount : 0;
-        if (effectiveConsecutive >= IDLE_RECONNECT_MAX_CONSECUTIVE) continue;
+        if (effectiveConsecutive >= maxConsecutive) continue;
 
-        const intervalMs = Math.max(1, rule.intervalMinutes) * 60_000;
+        const effectiveMinutes = getEffectiveIdleIntervalMinutes(
+            rule.characterId,
+            rule.sessionId,
+            effectiveConsecutive,
+            rule.intervalMinutes,
+        );
+        const intervalMs = Math.max(1, effectiveMinutes) * 60_000;
         const nextDueAt = Math.max(
             lastUserAt + intervalMs,
             rule.lastFiredAt ? rule.lastFiredAt + intervalMs : 0,
@@ -566,14 +616,15 @@ function pollIdleReconnect(now: number) {
         if (now < scheduledOutboxGraceUntil) continue;
         if (isWithinPushQuietHours(now)) continue; // 安静时段本地也不打扰，出时段后自然触发
 
-        console.log(`[IdleReconnect] Firing for session=${rule.sessionId}, idle=${Math.round((now - lastUserAt) / 60000)}min`);
-        void fireIdleReconnect(rule, lastUserAt);
+        console.log(`[IdleReconnect] Firing for session=${rule.sessionId}, idle=${Math.round((now - lastUserAt) / 60000)}min, interval=${effectiveMinutes}min`);
+        void fireIdleReconnect(rule, lastUserAt, effectiveMinutes);
     }
 }
 
-async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
+async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number, effectiveMinutes?: number) {
     idleReconnectFiringSet.add(rule.id);
     try {
+        if (!isIdleReconnectAllowedForCharacter(rule.characterId)) return;
         const session = loadChatSessions().find(s => s.id === rule.sessionId);
         if (!session || session.isGroup || session.contactId !== rule.characterId) return;
 
@@ -592,11 +643,12 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
             {
                 appTags: ["chat", "text", "idle_wake"],
                 timedWakeElapsedMinutes: elapsedMinutes,
+                ...(rule.intent ? { timedWakeIntent: rule.intent } : {}),
             },
         );
 
         if (isBackgroundGenerationCancelled(session.id)) {
-            const intervalMs = Math.max(1, rule.intervalMinutes) * 60_000;
+            const intervalMs = Math.max(1, effectiveMinutes ?? rule.intervalMinutes) * 60_000;
             const suppressed = suppressIdleReconnectUntil(rule.id, Date.now() + intervalMs);
             if (suppressed) void armIdleReconnectBailout(suppressed);
             window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
@@ -610,13 +662,26 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
             undefined,
             latestMessages,
         );
-        markIdleReconnectFired(rule.id, Date.now());
+        const maxConsecutive = getCharacterMaxConsecutive(rule.characterId);
+        markIdleReconnectFired(rule.id, Date.now(), maxConsecutive);
         if (hasVisible) scheduleFollowUp(session.id, 0, stateValues);
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
 
-        // 下一发（连发上限内）重新挂到服务端
+        // 下一发（连发上限内）按新退避阶梯重算间隔并挂到服务端
         const refreshed = loadIdleReconnectRules().find(item => item.id === rule.id);
-        if (refreshed) void armIdleReconnectBailout(refreshed);
+        if (refreshed) {
+            const nextInterval = getEffectiveIdleIntervalMinutes(
+                refreshed.characterId,
+                refreshed.sessionId,
+                refreshed.consecutiveCount,
+                refreshed.intervalMinutes,
+            );
+            const nextRule = nextInterval !== refreshed.intervalMinutes
+                ? { ...refreshed, intervalMinutes: nextInterval }
+                : refreshed;
+            if (nextInterval !== refreshed.intervalMinutes) upsertIdleReconnectRule(nextRule);
+            void armIdleReconnectBailout(nextRule);
+        }
     } catch (error: unknown) {
         console.error("[IdleReconnect] Error:", error);
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: rule.sessionId } }));

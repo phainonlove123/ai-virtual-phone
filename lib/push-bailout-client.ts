@@ -23,10 +23,17 @@ import {
 } from "./menstrual-storage";
 import { loadTimedWakeSchedules, type TimedWakeSchedule } from "./timed-wake-storage";
 import {
-    IDLE_RECONNECT_MAX_CONSECUTIVE,
     loadIdleReconnectRules,
     type IdleReconnectRule,
 } from "./idle-reconnect-storage";
+import {
+    getCharacterMaxConsecutive,
+    getEffectiveIdleIntervalMinutes,
+    isCharacterProactiveEnabled,
+    isFollowUpAllowedForSession,
+    isIdleReconnectAllowedForCharacter,
+    loadProactiveContactConfig,
+} from "./proactive-contact";
 import { loadCharacters } from "./character-storage";
 import type { RegexConfig } from "./settings-types";
 import type { LLMMessage } from "./llm-prompt-assembler";
@@ -265,6 +272,7 @@ export async function armFollowUpBailout(
         if (isWithinPushQuietHours(fireAt + FOLLOWUP_BAILOUT_GRACE_MS)) return; // 安静时段不打扰
         const session = loadChatSessions().find(s => s.id === sessionId);
         if (!session || session.isGroup) return; // 第一期只覆盖单聊追问
+        if (!isFollowUpAllowedForSession(session)) return;
         const latestMessages = loadChatMessages(sessionId);
         const count = prevCount + 1;
         const messagesWithHint = buildFollowUpSilenceMessages(session, latestMessages, fireAt);
@@ -397,6 +405,10 @@ function buildQuietWindowMeta(): { startMin: number; endMin: number; tzOffsetMin
 export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<BailoutArmResult> {
     if (!bailoutEnabled()) return { ok: false, reason: "当前环境不支持服务端离线预约" };
     try {
+        if (!isIdleReconnectAllowedForCharacter(rule.characterId)) {
+            await cancelBailoutPrefix(`idle:${rule.id}:`);
+            return { ok: false, reason: "该角色主动联系已关闭" };
+        }
         if (!(await hasAccountPushSubscription())) return { ok: false, reason: "当前账号没有可用的离线推送订阅" };
         const session = loadChatSessions().find(s => s.id === rule.sessionId);
         if (!session || session.isGroup || session.contactId !== rule.characterId) return { ok: false, reason: "找不到对应的单聊会话" };
@@ -405,14 +417,21 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         if (!lastUser) return { ok: false, reason: "这个会话还没有你的消息，无法计算沉默时间" };
         const lastUserAt = new Date(lastUser.createdAt).getTime();
 
+        const maxConsecutive = getCharacterMaxConsecutive(rule.characterId);
         const effectiveConsecutive = rule.lastFiredAt && rule.lastFiredAt > lastUserAt ? rule.consecutiveCount : 0;
-        if (effectiveConsecutive >= IDLE_RECONNECT_MAX_CONSECUTIVE) {
+        if (effectiveConsecutive >= maxConsecutive) {
             // 不再挂新单，把该规则的存量排队任务清干净
             await cancelBailoutPrefix(`idle:${rule.id}:`);
             return { ok: false, reason: "已达到连续主动联系上限" };
         }
 
-        const intervalMs = Math.max(1, rule.intervalMinutes) * 60_000;
+        const effectiveMinutes = getEffectiveIdleIntervalMinutes(
+            rule.characterId,
+            rule.sessionId,
+            effectiveConsecutive,
+            rule.intervalMinutes,
+        );
+        const intervalMs = Math.max(1, effectiveMinutes) * 60_000;
         const nextDueAt = Math.max(
             lastUserAt + intervalMs,
             rule.lastFiredAt ? rule.lastFiredAt + intervalMs : 0,
@@ -429,7 +448,11 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         const { llmMessages, character, config, preset, regexes, userIdentity } = await buildChatPromptMessages(
             session,
             history,
-            { appTags: ["chat", "text", "idle_wake"], timedWakeElapsedMinutes: elapsedMinutes },
+            {
+                appTags: ["chat", "text", "idle_wake"],
+                timedWakeElapsedMinutes: elapsedMinutes,
+                ...(rule.intent ? { timedWakeIntent: rule.intent } : {}),
+            },
         );
         maybeAppendCallInvite(llmMessages, rule.characterId);
         maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
@@ -439,7 +462,7 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
             const req = buildProviderRequest(config, preset, toLlmRequestMessages(messages));
             return { url: req.url, headers: req.headers, body: req.body, providerKind: req.providerKind };
         }, config.enableImageRecognition === true);
-        const remaining = IDLE_RECONNECT_MAX_CONSECUTIVE - effectiveConsecutive - 1;
+        const remaining = maxConsecutive - effectiveConsecutive - 1;
         // 先挂后清：POST 本身按同键先删后插（幂等覆盖），挂稳后再清理同前缀的其他旧键
         //（旧连发序号、服务端续排的 "+" 后缀键）。之前是先清后挂，切后台/杀进程
         // 发生在清理和重挂之间会把预约整个删空——服务端从此无单可执行。
@@ -607,13 +630,17 @@ export async function refreshScheduledBailouts(): Promise<void> {
     if (refreshingScheduled || !bailoutEnabled()) return;
     refreshingScheduled = true;
     try {
+        const proactiveConfig = loadProactiveContactConfig();
         for (const schedule of loadTimedWakeSchedules()) {
+            if (schedule.source !== "user" && !isCharacterProactiveEnabled(schedule.characterId)) continue;
             await armTimedWakeBailout(schedule);
         }
         for (const rule of loadIdleReconnectRules()) {
             await armIdleReconnectBailout(rule);
         }
-        await armPeriodCareBailouts();
+        if (proactiveConfig.globalEnabled && proactiveConfig.periodCareEnabled) {
+            await armPeriodCareBailouts();
+        }
     } finally {
         refreshingScheduled = false;
     }

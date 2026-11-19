@@ -38,6 +38,7 @@ import { CheckPhoneApp } from "@/components/checkphone/checkphone-app";
 import { ShoppingApp } from "@/components/shopping/shopping-app";
 import { GameHubApp } from "@/components/game/game-hub-app";
 import { MixologyApp } from "@/components/mixology/mixology-app";
+import { ProactiveContactApp } from "@/components/proactive-contact-app";
 import InterviewMagazineApp from "@/components/interview/interview-magazine-app";
 import { CoCreateApp } from "@/components/cocreate/cocreate-app";
 import { AppMarketApp } from "@/components/app-market/app-market-app";
@@ -4145,6 +4146,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
     if (activeApp === "mixology") {
       return <MixologyApp onClose={() => setActiveApp(null)} />;
+    }
+
+    if (activeApp === "proactive_contact") {
+      return <ProactiveContactApp onClose={() => setActiveApp(null)} onNotice={setNotice} />;
     }
 
     if (activeApp === "appmarket") {
